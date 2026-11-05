@@ -44,7 +44,7 @@
     "sim:acp": "vitest run --config vitest.sim.config.ts sim/acp.sim.ts"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "1.4.0",
+    "@agentclientprotocol/sdk": "2.4.0",
     "@kenkaiiii/gg-agent": "^5.49.3",
     "@kenkaiiii/gg-ai": "^5.49.3",
     "@tauri-apps/api": "^2.11.1",
