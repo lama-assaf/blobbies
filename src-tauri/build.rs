@@ -14,18 +14,45 @@ use sha2::{Digest, Sha256};
 /// app has to OCR offline, and must never fetch anything while handling a
 /// user's file. Each entry is pinned by SHA-256, so a swapped or truncated
 /// download fails the build instead of silently shipping.
-const MODELS: [(&str, &str, &str); 2] = [
-    (
-        "text-detection.rten",
-        "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
-        "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
-    ),
-    (
-        "text-recognition.rten",
-        "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
-        "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
-    ),
+///
+/// Every URL for a model must serve the *same bytes*; the mirrors are tried
+/// in order and the first one whose download matches the pin wins. The ocrs
+/// author's S3 bucket is first because it is the canonical home, but it went
+/// 403 `AccessDenied` in November 2026 (its README always said the URLs were
+/// not guaranteed stable), so a Wayback Machine snapshot of each file is the
+/// fallback. The `id_` flag asks the archive for the raw bytes, with no
+/// rewriting, and the timestamp pins one snapshot rather than "latest".
+///
+/// Not a usable mirror: the `.rten` files on Hugging Face
+/// (`robertknight/ocrs`). They are a 2024 export of the same checkpoints with
+/// different bytes, and with them `ocr::tests::reads_text_out_of_an_image`
+/// fails (reads `THello Biobbies`), so repinning to them would ship worse OCR.
+const MODELS: [Model; 2] = [
+    Model {
+        name: "text-detection.rten",
+        urls: &[
+            "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
+            "https://web.archive.org/web/20261006150332id_/https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
+        ],
+        sha256: "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
+    },
+    Model {
+        name: "text-recognition.rten",
+        urls: &[
+            "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
+            "https://web.archive.org/web/20260904021412id_/https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
+        ],
+        sha256: "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
+    },
 ];
+
+struct Model {
+    /// File name in `OUT_DIR`, and in `OCRS_MODEL_DIR`.
+    name: &'static str,
+    /// Mirrors, tried in order. All must serve bytes matching `sha256`.
+    urls: &'static [&'static str],
+    sha256: &'static str,
+}
 
 fn main() {
     fetch_models();
@@ -119,22 +146,27 @@ fn fetch_models() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo always sets OUT_DIR"));
     let local = std::env::var("OCRS_MODEL_DIR").ok().map(PathBuf::from);
 
-    for (name, url, sha256) in MODELS {
-        let target = out_dir.join(name);
-        if file_matches(&target, sha256) {
+    for model in &MODELS {
+        let target = out_dir.join(model.name);
+        if file_matches(&target, model.sha256) {
             continue;
         }
-        let bytes = match local.as_ref().map(|dir| dir.join(name)) {
-            Some(path) if path.exists() => std::fs::read(&path)
-                .unwrap_or_else(|error| panic!("reading {}: {error}", path.display())),
-            _ => download(url),
+        let bytes = match local.as_ref().map(|dir| dir.join(model.name)) {
+            Some(path) if path.exists() => {
+                let bytes = std::fs::read(&path)
+                    .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+                let found = hex_sha256(&bytes);
+                assert!(
+                    found == model.sha256,
+                    "{} failed its checksum.\n  expected {}\n  found    {found}\n\
+                     Refusing to embed an OCR model that is not the pinned one.",
+                    path.display(),
+                    model.sha256,
+                );
+                bytes
+            }
+            _ => download_pinned(model),
         };
-        let found = hex_sha256(&bytes);
-        assert!(
-            found == sha256,
-            "{name} failed its checksum.\n  expected {sha256}\n  found    {found}\n\
-             Refusing to embed an OCR model that is not the pinned one."
-        );
         std::fs::write(&target, &bytes)
             .unwrap_or_else(|error| panic!("writing {}: {error}", target.display()));
     }
@@ -144,9 +176,35 @@ fn file_matches(path: &Path, sha256: &str) -> bool {
     std::fs::read(path).is_ok_and(|bytes| hex_sha256(&bytes) == sha256)
 }
 
+/// Try each mirror in turn; the first download whose bytes match the pin is
+/// the one. A mirror that is down, or serves something else, is skipped with
+/// its reason kept for the error, so a build that fails says what every
+/// mirror did instead of only the last one.
+fn download_pinned(model: &Model) -> Vec<u8> {
+    let mut failures = Vec::new();
+    for url in model.urls {
+        match download(url) {
+            Ok(bytes) if hex_sha256(&bytes) == model.sha256 => return bytes,
+            Ok(bytes) => failures.push(format!(
+                "{url}: checksum mismatch\n    expected {}\n    found    {}",
+                model.sha256,
+                hex_sha256(&bytes)
+            )),
+            Err(error) => failures.push(format!("{url}: {error}")),
+        }
+    }
+    panic!(
+        "no mirror served the pinned {}:\n  {}\n\
+         Refusing to embed an OCR model that is not the pinned one.\n\
+         Set OCRS_MODEL_DIR to a directory holding the model files to build offline.",
+        model.name,
+        failures.join("\n  "),
+    );
+}
+
 /// Fetch with the platform's own HTTP client, so downloading at build time
 /// does not pull a second TLS stack into the dependency tree.
-fn download(url: &str) -> Vec<u8> {
+fn download(url: &str) -> Result<Vec<u8>, String> {
     let output = std::process::Command::new("curl")
         .args([
             "--fail",
@@ -158,18 +216,11 @@ fn download(url: &str) -> Vec<u8> {
             url,
         ])
         .output()
-        .unwrap_or_else(|error| {
-            panic!(
-                "could not run curl to fetch {url}: {error}\n\
-                 Set OCRS_MODEL_DIR to a directory holding the model files to build offline."
-            )
-        });
-    assert!(
-        output.status.success(),
-        "downloading {url} failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    output.stdout
+        .map_err(|error| format!("could not run curl: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(output.stdout)
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
