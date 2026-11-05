@@ -16,12 +16,14 @@ use sha2::{Digest, Sha256};
 /// download fails the build instead of silently shipping.
 ///
 /// Every URL for a model must serve the *same bytes*; the mirrors are tried
-/// in order and the first one whose download matches the pin wins. The ocrs
-/// author's S3 bucket is first because it is the canonical home, but it went
-/// 403 `AccessDenied` in November 2026 (its README always said the URLs were
-/// not guaranteed stable), so a Wayback Machine snapshot of each file is the
-/// fallback. The `id_` flag asks the archive for the raw bytes, with no
-/// rewriting, and the timestamp pins one snapshot rather than "latest".
+/// in order and the first one whose download matches the pin wins. First is
+/// a GitHub release on this project's own repo, because it is the only host
+/// here that we control. The ocrs author's S3 bucket, the canonical home, is
+/// second: it went 403 `AccessDenied` in November 2026 (its README always said
+/// the URLs were not guaranteed stable), but may come back. Last is a Wayback
+/// Machine snapshot of each file, where the `id_` flag asks the archive for
+/// the raw bytes, with no rewriting, and the timestamp pins one snapshot
+/// rather than "latest".
 ///
 /// Not a usable mirror: the `.rten` files on Hugging Face
 /// (`robertknight/ocrs`). They are a 2024 export of the same checkpoints with
@@ -31,6 +33,7 @@ const MODELS: [Model; 2] = [
     Model {
         name: "text-detection.rten",
         urls: &[
+            "https://github.com/lama-assaf/blobbies/releases/download/ocrs-models-v1/text-detection.rten",
             "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
             "https://web.archive.org/web/20261006150332id_/https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
         ],
@@ -39,6 +42,7 @@ const MODELS: [Model; 2] = [
     Model {
         name: "text-recognition.rten",
         urls: &[
+            "https://github.com/lama-assaf/blobbies/releases/download/ocrs-models-v1/text-recognition.rten",
             "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
             "https://web.archive.org/web/20260904021412id_/https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
         ],
